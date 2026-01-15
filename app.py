@@ -13,57 +13,78 @@ from sklearn.ensemble import GradientBoostingClassifier
 load_dotenv()
 
 # --- 1. DIRECTORY & PATH SETUP ---
-# This ensures the app finds files regardless of the deployment environment
+# This ensures the app finds files correctly on Linux deployment servers
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, 'student_gb_model.pkl')
 DATA_PATH = os.path.join(BASE_DIR, 'Updated_Student_Performance.csv')
 INTENTS_PATH = os.path.join(BASE_DIR, 'intents.json')
 
-# --- 2. ASSET LOADING & AUTO-TRAINING ---
+# --- 2. ROBUST ASSET LOADING & AUTO-TRAINING ---
 @st.cache_resource
 def load_or_train_model():
     """
-    Checks for the model file. If missing, it trains a new one using the CSV.
+    Finds the model or trains it automatically from the CSV.
+    Uses case-insensitive column matching for maximum compatibility.
     """
-    features = ['Study Hours per Week', 'Attendance Rate', 'Previous Grades', 'Participation in Extracurricular Activities']
+    target_features = [
+        'Study Hours per Week', 
+        'Attendance Rate', 
+        'Previous Grades', 
+        'Participation in Extracurricular Activities'
+    ]
 
-    # Step A: Try to load existing model
+    # Step A: Try loading existing model
     if os.path.exists(MODEL_PATH):
         try:
             return joblib.load(MODEL_PATH)
-        except:
-            pass # If loading fails, move to training
+        except Exception as e:
+            st.warning(f"Corrupted model file detected. Retraining... Error: {e}")
     
-    # Step B: Train from CSV if model is missing
+    # Step B: Train from CSV if model is missing or broken
     if os.path.exists(DATA_PATH):
         try:
             df = pd.read_csv(DATA_PATH)
             
-            # Prepare Training Data
-            X = df[features].copy()
-            # Ensure target 'Passed' exists and is mapped to numbers
-            if 'Passed' in df.columns:
-                y = df['Passed'].map({'Yes': 1, 'No': 0}).fillna(0)
-            else:
-                st.error("Dataset missing 'Passed' column.")
+            # Case-insensitive column matching
+            actual_cols = {col.lower().strip(): col for col in df.columns}
+            synced_features = []
+            
+            for feat in target_features:
+                if feat.lower() in actual_cols:
+                    synced_features.append(actual_cols[feat.lower()])
+                else:
+                    st.error(f"Required column '{feat}' missing from CSV.")
+                    return None
+
+            # Prepare Data
+            X = df[synced_features].copy()
+            
+            # Find and map 'Passed' column
+            passed_col = actual_cols.get('passed')
+            if not passed_col:
+                st.error("Target column 'Passed' not found in CSV.")
                 return None
+            
+            y = df[passed_col].map({'Yes': 1, 'No': 0, 1: 1, 0: 0}).fillna(0)
 
             # Preprocessing
-            for col in ['Study Hours per Week', 'Attendance Rate', 'Previous Grades']:
+            for col in synced_features:
                 X[col] = pd.to_numeric(X[col], errors='coerce')
                 X[col] = X[col].fillna(X[col].median())
             
-            X['Participation in Extracurricular Activities'] = X['Participation in Extracurricular Activities'].map({'Yes': 1, 'No': 0}).fillna(0)
+            # Force binary for extracurriculars
+            extra_col = synced_features[3]
+            X[extra_col] = df[extra_col].map({'Yes': 1, 'No': 0, 1: 1, 0: 0}).fillna(0)
 
-            # Train the Gradient Boosting "Brain"
+            # Train the Brain
             model = GradientBoostingClassifier(n_estimators=100, random_state=42)
             model.fit(X, y)
             
-            # Save for future sessions
+            # Save for future use
             joblib.dump(model, MODEL_PATH)
             return model
         except Exception as e:
-            st.error(f"Auto-training failed: {e}")
+            st.error(f"Auto-training logic failed: {e}")
             return None
     
     return None
@@ -78,17 +99,18 @@ def load_intents():
             return {"intents": []}
     return {"intents": []}
 
-# Initialize model and data
-model = load_or_train_model()
-intents_data = load_intents()
+# --- 3. INITIALIZATION ---
 st.set_page_config(page_title="PathMaster AI", layout="wide", page_icon="🤖")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
+model = load_or_train_model()
+intents_data = load_intents()
+
 if model is None:
-    st.error(f"🚨 **Files Missing!** Please ensure '{os.path.basename(DATA_PATH)}' is in your GitHub repository.")
+    st.error(f"🚨 **Critical Files Missing!** Ensure 'Updated_Student_Performance.csv' is in your GitHub repository.")
+    st.info(f"App is looking at: {DATA_PATH}")
     st.stop()
 
-# --- 3. SESSION STATE ---
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "current_prediction" not in st.session_state:
@@ -103,7 +125,7 @@ def get_local_response(user_text):
 
 # --- 4. UI: STUDENT PROFILE HUB ---
 st.title("🤖 PathMaster AI")
-st.markdown("Holistic academic forecasting and career alignment strategy.")
+st.markdown("Your strategic diagnostic center for academic and career alignment.")
 
 with st.form("study_input"):
     col1, col2 = st.columns(2)
@@ -120,7 +142,7 @@ with st.form("study_input"):
         extracurricular = st.radio("Extracurriculars?", ["Yes", "No"], horizontal=True)
     submit_btn = st.form_submit_button("Run Strategic Analysis")
 
-# --- 5. LOGIC & AI ---
+# --- 5. LOGIC & AI FORECASTING ---
 if submit_btn:
     features_list = ['Study Hours per Week', 'Attendance Rate', 'Previous Grades', 'Participation in Extracurricular Activities']
     input_df = pd.DataFrame([[
@@ -130,7 +152,7 @@ if submit_btn:
     raw_pred = model.predict(input_df)[0]
     prob_status = "Positive" if raw_pred == 1 else "Critical"
 
-    with st.spinner("Analyzing alignment..."):
+    with st.spinner("Calculating strategy..."):
         try:
             client = Groq(api_key=GROQ_API_KEY)
             prompt = f"""Expert Strategist: Studies: {studying}, Passion: {passion}, Goals: {goals}. ML Forecast: {prob_status}."""
@@ -148,14 +170,14 @@ if submit_btn:
         except Exception as e:
             st.error(f"AI Error: {e}")
 
-# --- 6. CHATBOX ---
+# --- 6. CHATBOT INTERFACE ---
 st.divider()
 st.subheader("💬 Strategic Advisory Session")
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-if user_query := st.chat_input("Ask about your roadmap..."):
+if user_query := st.chat_input("Ask about your roadmap or pivot options..."):
     st.chat_message("user").markdown(user_query)
     st.session_state.messages.append({"role": "user", "content": user_query})
     
@@ -166,11 +188,11 @@ if user_query := st.chat_input("Ask about your roadmap..."):
             client = Groq(api_key=GROQ_API_KEY)
             response = client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
-                messages=[{"role": "system", "content": "You are a Study Buddy."}, *st.session_state.messages[-5:]]
+                messages=[{"role": "system", "content": "You are a helpful Study Buddy Advisor."}, *st.session_state.messages[-5:]]
             )
             buddy_reply = response.choices[0].message.content
         except:
-            buddy_reply = "Service busy, try again!"
+            buddy_reply = "The advisor is currently busy. Please try again in a moment."
             
     with st.chat_message("assistant"):
         st.markdown(buddy_reply)
