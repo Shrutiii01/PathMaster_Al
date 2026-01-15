@@ -12,58 +12,83 @@ from sklearn.ensemble import GradientBoostingClassifier
 # Load environment variables
 load_dotenv()
 
-# --- 1. SETTINGS & ASSET LOADING ---
-st.set_page_config(page_title="PathMaster AI", layout="wide", page_icon="🤖")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+# --- 1. DIRECTORY & PATH SETUP ---
+# This ensures the app finds files regardless of the deployment environment
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(BASE_DIR, 'student_gb_model.pkl')
+DATA_PATH = os.path.join(BASE_DIR, 'Updated_Student_Performance.csv')
+INTENTS_PATH = os.path.join(BASE_DIR, 'intents.json')
 
-@st.cache_data
-def load_intents():
-    try:
-        with open('intents.json', 'r') as f:
-            return json.load(f)
-    except Exception:
-        return {"intents": []}
-
+# --- 2. ASSET LOADING & AUTO-TRAINING ---
 @st.cache_resource
-def load_model_and_train_if_missing():
+def load_or_train_model():
     """
     Checks for the model file. If missing, it trains a new one using the CSV.
     """
-    model_path = 'student_gb_model.pkl'
-    data_path = 'Updated_Student_Performance.csv'
     features = ['Study Hours per Week', 'Attendance Rate', 'Previous Grades', 'Participation in Extracurricular Activities']
 
-    if os.path.exists(model_path):
-        return joblib.load(model_path)
+    # Step A: Try to load existing model
+    if os.path.exists(MODEL_PATH):
+        try:
+            return joblib.load(MODEL_PATH)
+        except:
+            pass # If loading fails, move to training
     
-    elif os.path.exists(data_path):
-        # Auto-train logic if model is missing during deployment
-        df = pd.read_csv(data_path)
-        X = df[features].copy()
-        y = df['Passed'].map({'Yes': 1, 'No': 0}).fillna(0)
+    # Step B: Train from CSV if model is missing
+    if os.path.exists(DATA_PATH):
+        try:
+            df = pd.read_csv(DATA_PATH)
+            
+            # Prepare Training Data
+            X = df[features].copy()
+            # Ensure target 'Passed' exists and is mapped to numbers
+            if 'Passed' in df.columns:
+                y = df['Passed'].map({'Yes': 1, 'No': 0}).fillna(0)
+            else:
+                st.error("Dataset missing 'Passed' column.")
+                return None
 
-        # Preprocessing
-        for col in ['Study Hours per Week', 'Attendance Rate', 'Previous Grades']:
-            X[col] = X[col].fillna(X[col].median())
-        X['Participation in Extracurricular Activities'] = X['Participation in Extracurricular Activities'].map({'Yes': 1, 'No': 0}).fillna(0)
+            # Preprocessing
+            for col in ['Study Hours per Week', 'Attendance Rate', 'Previous Grades']:
+                X[col] = pd.to_numeric(X[col], errors='coerce')
+                X[col] = X[col].fillna(X[col].median())
+            
+            X['Participation in Extracurricular Activities'] = X['Participation in Extracurricular Activities'].map({'Yes': 1, 'No': 0}).fillna(0)
 
-        # Training
-        model = GradientBoostingClassifier(n_estimators=100, random_state=42)
-        model.fit(X, y)
-        
-        # Save so we don't have to train again
-        joblib.dump(model, model_path)
-        return model
+            # Train the Gradient Boosting "Brain"
+            model = GradientBoostingClassifier(n_estimators=100, random_state=42)
+            model.fit(X, y)
+            
+            # Save for future sessions
+            joblib.dump(model, MODEL_PATH)
+            return model
+        except Exception as e:
+            st.error(f"Auto-training failed: {e}")
+            return None
+    
     return None
 
-model = load_model_and_train_if_missing()
+@st.cache_data
+def load_intents():
+    if os.path.exists(INTENTS_PATH):
+        try:
+            with open(INTENTS_PATH, 'r') as f:
+                return json.load(f)
+        except:
+            return {"intents": []}
+    return {"intents": []}
+
+# Initialize model and data
+model = load_or_train_model()
 intents_data = load_intents()
+st.set_page_config(page_title="PathMaster AI", layout="wide", page_icon="🤖")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 if model is None:
-    st.error("Critical Error: CSV data file missing. Cannot train model.")
+    st.error(f"🚨 **Files Missing!** Please ensure '{os.path.basename(DATA_PATH)}' is in your GitHub repository.")
     st.stop()
 
-# Initialize Chat History
+# --- 3. SESSION STATE ---
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "current_prediction" not in st.session_state:
@@ -76,7 +101,7 @@ def get_local_response(user_text):
                 return random.choice(intent.get('responses'))
     return None
 
-# --- 2. UI: STUDENT PROFILE HUB ---
+# --- 4. UI: STUDENT PROFILE HUB ---
 st.title("🤖 PathMaster AI")
 st.markdown("Holistic academic forecasting and career alignment strategy.")
 
@@ -95,7 +120,7 @@ with st.form("study_input"):
         extracurricular = st.radio("Extracurriculars?", ["Yes", "No"], horizontal=True)
     submit_btn = st.form_submit_button("Run Strategic Analysis")
 
-# --- 3. INTEGRATED LOGIC ---
+# --- 5. LOGIC & AI ---
 if submit_btn:
     features_list = ['Study Hours per Week', 'Attendance Rate', 'Previous Grades', 'Participation in Extracurricular Activities']
     input_df = pd.DataFrame([[
@@ -123,7 +148,7 @@ if submit_btn:
         except Exception as e:
             st.error(f"AI Error: {e}")
 
-# --- 4. CHATBOX ---
+# --- 6. CHATBOX ---
 st.divider()
 st.subheader("💬 Strategic Advisory Session")
 for message in st.session_state.messages:
@@ -133,7 +158,9 @@ for message in st.session_state.messages:
 if user_query := st.chat_input("Ask about your roadmap..."):
     st.chat_message("user").markdown(user_query)
     st.session_state.messages.append({"role": "user", "content": user_query})
+    
     buddy_reply = get_local_response(user_query)
+    
     if not buddy_reply:
         try:
             client = Groq(api_key=GROQ_API_KEY)
@@ -144,6 +171,7 @@ if user_query := st.chat_input("Ask about your roadmap..."):
             buddy_reply = response.choices[0].message.content
         except:
             buddy_reply = "Service busy, try again!"
+            
     with st.chat_message("assistant"):
         st.markdown(buddy_reply)
     st.session_state.messages.append({"role": "assistant", "content": buddy_reply})
